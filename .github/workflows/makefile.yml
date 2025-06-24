@@ -1,0 +1,142 @@
+name: Make commit on patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:https://github.com/jsdizkcksv/android_kernel_aresin
+        description: 'Git 仓库 URL'
+        required: true
+      branch:A16
+        description: '仓库分支 (默认使用默认分支)'
+        required: false
+        default: ''
+      start_commit:620d928
+        description: '起始提交'
+        required: true
+      end_commit:620d928
+        description: '结束提交'
+        required: true
+      patch_type:'单个
+        description: '补丁文件类型'
+        required: true
+        default: '多个'
+        type: choice
+        options:
+          - '单个'
+          - '多个'
+      create_release:true
+        description: '是否创建 GitHub Release'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+# 添加工作流级别的权限
+permissions:
+  contents: write
+
+jobs:
+  Make:
+    runs-on: ubuntu-latest
+    # 添加作业级别的权限（双重保障）
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+    
+    env:
+      WORKSPACE: ${{ github.workspace }}
+      BUILD_DATE: $(date +'%Y%m%d')
+    
+    steps:
+    - name: 检出当前仓库
+      uses: actions/checkout@v4
+
+    - name: 准备环境
+      run: |
+        mkdir -p source_repo patches
+        echo "工作区路径: $WORKSPACE"
+
+    - name: 克隆源仓库
+      run: |
+        cd "$WORKSPACE/source_repo"
+        if [ -n "${{ github.event.inputs.branch }}" ]; then
+          git clone --branch "${{ github.event.inputs.branch }}" "${{ github.event.inputs.repo_url }}" .
+        else
+          git clone "${{ github.event.inputs.repo_url }}" .
+        fi
+
+    - name: 生成补丁文件
+      id: generate
+      run: |
+        cd "$WORKSPACE/source_repo"
+        
+        START_HASH=$(git rev-parse "${{ github.event.inputs.start_commit }}")
+        END_HASH=$(git rev-parse "${{ github.event.inputs.end_commit }}")
+        
+        OUTPUT_DIR="$WORKSPACE/patches"
+        mkdir -p "$OUTPUT_DIR"
+
+        if [ "${{ github.event.inputs.patch_type }}" = "单个" ]; then
+          git diff "$START_HASH" "$END_HASH" > "$OUTPUT_DIR/combined.patch"
+          echo "patch_file=combined.patch" >> $GITHUB_OUTPUT
+        else
+          git format-patch "$START_HASH..$END_HASH" -o "$OUTPUT_DIR"
+        fi
+
+        echo "patch_dir=$OUTPUT_DIR" >> $GITHUB_OUTPUT
+
+    - name: 创建时间戳命名的 ZIP 文件
+      id: create_zip
+      run: |
+        TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+        ZIP_NAME="patch_$TIMESTAMP.zip"
+        
+        cd "$WORKSPACE/patches"
+        zip -r "$WORKSPACE/$ZIP_NAME" .
+        
+        echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
+        echo "zip_path=$WORKSPACE/$ZIP_NAME" >> $GITHUB_OUTPUT
+        echo "zip_timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
+
+    - name: 清理环境
+      run: |
+        rm -rf "$WORKSPACE/source_repo"
+        rm -rf "$WORKSPACE/patches"
+
+    - name: 上传 ZIP 文件到工作流产物
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.create_zip.outputs.zip_name }}
+        path: ${{ steps.create_zip.outputs.zip_path }}
+        if-no-files-found: error
+
+    - name: 创建 GitHub Release
+      id: create_release
+      if: ${{ github.event.inputs.create_release == 'true' }}
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: "patch-${{ steps.create_zip.outputs.zip_timestamp }}"
+        name: "Patch Files - ${{ steps.create_zip.outputs.zip_timestamp }}"
+        body: "自动生成的补丁文件"
+        draft: false
+        prerelease: false
+        files: ${{ steps.create_zip.outputs.zip_path }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: 显示结果
+      run: |
+        echo "补丁生成完成"
+        echo "ZIP文件: ${{ steps.create_zip.outputs.zip_name }}"
+        if [ "${{ github.event.inputs.create_release }}" = "true" ]; then
+          if [ "${{ steps.create_release.conclusion }}" = "success" ]; then
+            echo "GitHub Release 已创建: ${{ steps.create_release.outputs.url }}"
+          else
+            echo "GitHub Release 创建失败，请检查权限设置"
+          fi
+        else
+          echo "可在工作流产物中下载补丁文件"
+        fi
